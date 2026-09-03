@@ -1,0 +1,13 @@
+Drop background music tracks (.mp3 / .wav) into this folder.
+One is picked at random per clip when `music.enabled: true`.
+
+Nothing is shipped here on purpose: the repository must stay free of
+third-party licensed audio.
+
+---
+
+Положите сюда фоновые музыкальные треки (.mp3 / .wav).
+Для каждого клипа выбирается случайный трек, если `music.enabled: true`.
+
+В репозитории намеренно нет ни одного файла: он не должен содержать
+чужую лицензионную музыку.

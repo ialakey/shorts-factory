@@ -1,0 +1,40 @@
+# Environment files
+.env
+.env.*
+!.env.example
+
+# Python cache and build artifacts
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+
+# IDE and tooling metadata
+.idea/
+.vscode/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Tests
+.pytest_cache/
+reports/
+
+# Media: source footage and rendered clips never belong in git
+channels/*/input_videos/*
+channels/*/output_clips/*
+channels/*/logs/*
+!channels/*/input_videos/.gitkeep
+!channels/*/output_clips/.gitkeep
+!channels/*/logs/.gitkeep
+test_data/*
+output_test_data/*
+!test_data/.gitkeep
+!output_test_data/.gitkeep
+*.mp4
+*.mkv
+*.webm

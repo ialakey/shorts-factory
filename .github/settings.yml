@@ -1,0 +1,48 @@
+# Repository metadata.
+#
+# This file is the source of truth for the repo's description and topics, so the
+# values live in git instead of only in the GitHub UI. It is applied automatically
+# only if the Probot "Settings" app (https://github.com/apps/settings) is installed
+# on the repository. Without the app it is documentation: copy the values into
+# Settings → General → Description and the "Topics" field on the repo home page.
+#
+# Метаданные репозитория. Файл — источник правды для description и topics, чтобы
+# значения жили в git, а не только в интерфейсе GitHub. Автоматически применяется
+# только при установленном приложении Probot "Settings". Без него — просто
+# документация: скопируйте значения в настройки репозитория.
+
+repository:
+  description: >-
+    Long video → vertical Shorts. Multi-signal moment scoring instead of prompting
+    an LLM, plus a virtual camera that reframes 9:16 like a human operator.
+    One config.yaml drives the whole pipeline.
+
+  homepage: https://habr.com/ru/articles/1022250/
+
+  # Searchable tags. GitHub ranks these alongside the name and description,
+  # and they are what puts the repo in topic listings.
+  topics:
+    - video-processing
+    - youtube-shorts
+    - auto-reframe
+    - face-tracking
+    - video-editing
+    - ffmpeg
+    - moviepy
+    - whisper
+    - opencv
+    - llm
+    - python
+    - content-automation
+
+  has_issues: true
+  has_wiki: false
+  has_projects: false
+
+  default_branch: main
+
+  # Keep history linear: the showcase is a single clean commit by design.
+  allow_squash_merge: true
+  allow_merge_commit: false
+  allow_rebase_merge: true
+  delete_branch_on_merge: true

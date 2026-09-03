@@ -1,0 +1,26 @@
+# Зависимости для тестов и CI.
+#
+# Это подмножество requirements.txt. Намеренно не ставятся:
+#   * openai-whisper (тянет torch, ~2 ГБ) — в тестах заглушается в conftest.py;
+#   * mediapipe — необязательный бэкенд детектора, код обязан работать без него
+#     (fallback YuNet → Haar), и CI как раз проверяет эту деградацию;
+#   * anime_parsers_ru — нужен только сетевому этапу kodik_download, заглушается.
+#
+# opencv-python заменён на headless-сборку: в CI нет GUI-библиотек.
+
+moviepy==1.0.3
+numpy==2.1.3
+tqdm==4.66.6
+requests==2.32.3
+openai==0.28.0
+imageio[ffmpeg]
+decorator
+Pillow==11.0.0
+PyYAML==6.0.2
+opencv-python-headless==4.10.0.84
+python-dotenv==1.1.1
+pilmoji==2.0.4
+# pilmoji 2.0.4 requires emoji 1.x: get_emoji_unicode_dict was removed in emoji 2.0.0
+emoji==1.7.0
+
+pytest>=8.0,<10

@@ -140,6 +140,12 @@ def test_normalise_filename_strips_path_separators():
     assert " " not in name
 
 
+def test_normalise_filename_keeps_cyrillic_intact():
+    # NFKD разложил бы «й» и «ё» на букву + combining-символ, а тот выпал бы
+    # из-за isalnum() — в имени файла оставалось бы «Таитл про ежика».
+    assert ad.normalise_filename("Тайтл про ёжика") == "Тайтл_про_ёжика"
+
+
 def test_normalise_entry_sequence_with_quality_and_player():
     request = ad._normalise_entry(["Тайтл", "1-2", "AniLibria", "720p", "kodik"])
     assert request == ad.DownloadRequest(
@@ -280,7 +286,7 @@ def test_auto_download_titles_downloads_requested_episodes(
     monkeypatch, tmp_path, site_factory, downloads
 ):
     site_factory(
-        [anime("Клинок")],
+        [anime("Тайтл")],
         {
             1: [link("Kodik", "AniLibria", KODIK_EMBED)],
             2: [link("Kodik", "AniLibria", KODIK_EMBED)],
@@ -290,13 +296,13 @@ def test_auto_download_titles_downloads_requested_episodes(
         ad.adc, "extract", lambda url, **kwargs: result(stream("mp4-720", "mp4", 720))
     )
 
-    saved = ad.auto_download_titles([["Клинок", "1-2", "AniLibria"]], tmp_path)
+    saved = ad.auto_download_titles([["Тайтл", "1-2", "AniLibria"]], tmp_path)
 
     assert len(saved) == 2
     assert all(path.exists() for path in saved)
     assert [path.name for path in saved] == [
-        "Клинок_-_Серия_1_-_AniLibria_-_720p.mp4",
-        "Клинок_-_Серия_2_-_AniLibria_-_720p.mp4",
+        "Тайтл_-_Серия_1_-_AniLibria_-_720p.mp4",
+        "Тайтл_-_Серия_2_-_AniLibria_-_720p.mp4",
     ]
 
 
@@ -304,7 +310,7 @@ def test_falls_back_to_next_player_when_first_fails(
     monkeypatch, tmp_path, site_factory, downloads
 ):
     site_factory(
-        [anime("Клинок")],
+        [anime("Тайтл")],
         {
             1: [
                 link("Kodik", "AniLibria", KODIK_EMBED),
@@ -320,7 +326,7 @@ def test_falls_back_to_next_player_when_first_fails(
 
     monkeypatch.setattr(ad.adc, "extract", flaky_extract)
 
-    saved = ad.auto_download_titles([["Клинок", "1", "AniLibria"]], tmp_path)
+    saved = ad.auto_download_titles([["Тайтл", "1", "AniLibria"]], tmp_path)
 
     assert len(saved) == 1
     assert saved[0].name.endswith("1080p.mp4")
@@ -330,27 +336,27 @@ def test_falls_back_to_next_player_when_first_fails(
 def test_episode_is_skipped_when_every_player_fails(
     monkeypatch, tmp_path, site_factory, downloads
 ):
-    site_factory([anime("Клинок")], {1: [link("Kodik", "AniLibria", KODIK_EMBED)]})
+    site_factory([anime("Тайтл")], {1: [link("Kodik", "AniLibria", KODIK_EMBED)]})
     monkeypatch.setattr(
         ad.adc,
         "extract",
         lambda url, **kwargs: (_ for _ in ()).throw(adc.NoStreamsFound("пусто")),
     )
 
-    assert ad.auto_download_titles([["Клинок", "1"]], tmp_path) == []
+    assert ad.auto_download_titles([["Тайтл", "1"]], tmp_path) == []
     assert downloads == []
 
 
 def test_existing_file_is_not_redownloaded(monkeypatch, tmp_path, site_factory, downloads):
-    site_factory([anime("Клинок")], {1: [link("Kodik", "AniLibria", KODIK_EMBED)]})
+    site_factory([anime("Тайтл")], {1: [link("Kodik", "AniLibria", KODIK_EMBED)]})
     monkeypatch.setattr(
         ad.adc, "extract", lambda url, **kwargs: result(stream("mp4-720", "mp4", 720))
     )
 
-    existing = tmp_path / "Клинок_-_Серия_1_-_AniLibria_-_720p.mp4"
+    existing = tmp_path / "Тайтл_-_Серия_1_-_AniLibria_-_720p.mp4"
     existing.write_bytes(b"already here")
 
-    assert ad.auto_download_titles([["Клинок", "1", "AniLibria"]], tmp_path) == [existing]
+    assert ad.auto_download_titles([["Тайтл", "1", "AniLibria"]], tmp_path) == [existing]
     assert downloads == []
     assert existing.read_bytes() == b"already here"
 
@@ -358,38 +364,38 @@ def test_existing_file_is_not_redownloaded(monkeypatch, tmp_path, site_factory, 
 def test_missing_episode_does_not_break_the_rest(
     monkeypatch, tmp_path, site_factory, downloads
 ):
-    site_factory([anime("Клинок")], {1: [link("Kodik", "AniLibria", KODIK_EMBED)]})
+    site_factory([anime("Тайтл")], {1: [link("Kodik", "AniLibria", KODIK_EMBED)]})
     monkeypatch.setattr(
         ad.adc, "extract", lambda url, **kwargs: result(stream("mp4-720", "mp4", 720))
     )
 
-    saved = ad.auto_download_titles([["Клинок", "1-2", "AniLibria"]], tmp_path)
+    saved = ad.auto_download_titles([["Тайтл", "1-2", "AniLibria"]], tmp_path)
 
-    assert [path.name for path in saved] == ["Клинок_-_Серия_1_-_AniLibria_-_720p.mp4"]
+    assert [path.name for path in saved] == ["Тайтл_-_Серия_1_-_AniLibria_-_720p.mp4"]
 
 
 def test_broken_entry_does_not_stop_the_good_one(
     monkeypatch, tmp_path, site_factory, downloads
 ):
-    site_factory([anime("Клинок")], {1: [link("Kodik", "AniLibria", KODIK_EMBED)]})
+    site_factory([anime("Тайтл")], {1: [link("Kodik", "AniLibria", KODIK_EMBED)]})
     monkeypatch.setattr(
         ad.adc, "extract", lambda url, **kwargs: result(stream("mp4-720", "mp4", 720))
     )
 
-    saved = ad.auto_download_titles(["мусор", ["Клинок", "1", "AniLibria"]], tmp_path)
+    saved = ad.auto_download_titles(["мусор", ["Тайтл", "1", "AniLibria"]], tmp_path)
 
     assert len(saved) == 1
 
 
 def test_search_failure_is_wrapped_and_not_fatal(monkeypatch, tmp_path, site_factory):
-    site = site_factory([anime("Клинок")], {})
+    site = site_factory([anime("Тайтл")], {})
 
     def failing_search(query, limit=15):
         raise adc.ServiceError("Cloudflare", status=403, url="https://animego.org/")
 
     monkeypatch.setattr(site, "search", failing_search)
 
-    assert ad.auto_download_titles([["Клинок", "1"]], tmp_path) == []
+    assert ad.auto_download_titles([["Тайтл", "1"]], tmp_path) == []
     assert site.closed
 
 
@@ -400,7 +406,7 @@ def test_empty_section_is_skipped(tmp_path):
 
 def test_unreachable_source_skips_download(monkeypatch, tmp_path):
     monkeypatch.setattr(ad, "is_source_reachable", lambda host=None: False)
-    assert ad.auto_download_titles([["Клинок", "1"]], tmp_path) == []
+    assert ad.auto_download_titles([["Тайтл", "1"]], tmp_path) == []
 
 
 def test_source_host_follows_mirror_setting(monkeypatch):

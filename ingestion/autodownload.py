@@ -136,7 +136,10 @@ class Candidate:
 
 
 def normalise_filename(value: str) -> str:
-    normalised = unicodedata.normalize("NFKD", value)
+    # Именно NFKC, а не NFKD: разложение отрывает диакритику в отдельный
+    # combining-символ, который не проходит проверку isalnum() и выпадает —
+    # «Тайтл» превращался в «Таитл», «ё» в «е».
+    normalised = unicodedata.normalize("NFKC", value)
     allowed = []
     for char in normalised:
         if char.isalnum() or char in {" ", "-", "_"}:

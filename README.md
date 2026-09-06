@@ -137,7 +137,8 @@ cp .env.example .env
 OPENAI_API_KEY=sk-...     # required
 TELEGRAM_BOT_TOKEN=       # optional — only for the telegram_notify stage
 TELEGRAM_CHAT_ID=
-KODIK_TOKEN=              # optional — only for the kodik_download stage
+ANIMEGO_MIRROR=           # optional — AnimeGO mirror if the default domain is blocked
+ANIME_DL_PROXY=           # optional — proxy for the download stage (http:// or socks5://)
 ```
 
 `.env` is git-ignored. **No token is ever read from `config.yaml`** — secrets live in the environment only.
@@ -168,7 +169,7 @@ infrastructure/
   check_structure.py            # creates missing folders and config.yaml
 
 ingestion/
-  autodownload.py               # episode download via Kodik
+  autodownload.py               # episode download via anime-dl-core
   parser.py                     # input video discovery
   transcriber.py                # ffmpeg audio extraction + Whisper
 
@@ -223,7 +224,7 @@ Stages are listed in `channels/<Channel>/config.yaml → pipeline`.
 
 | Stage | Module | What it does |
 |---|---|---|
-| `kodik_download` | `ingestion/autodownload.py` | Downloads episodes by title list via Kodik (legacy name `autodownload` still accepted) |
+| `kodik_download` | `ingestion/autodownload.py` | Downloads episodes by title list via [anime-dl-core](https://github.com/ialakey/anime-dl-core) (legacy name `autodownload` still accepted) |
 | `transcribe_video` | `ingestion/transcriber.py` | Extracts the first audio track via ffmpeg (16 kHz mono PCM) and transcribes it with Whisper |
 | `analyze_moment` | `analysis/gpt_analyzer.py` | Builds the multi-signal payload and gets a list of moments with segments back from the LLM |
 | `make_clips` | `rendering/video_editor.py` | Cuts and joins segments, assembles the final 1080×1920 canvas |
@@ -337,7 +338,7 @@ Live, fully commented example: [`channels/DemoChannel/config.yaml`](channels/Dem
 | `moment_scoring` | Signal weights and candidate selection before the LLM |
 | `moment_validation` | Boundary snapping and rejection rules after the LLM |
 | `gpt` | Model, `min_time`/`max_time` and `min_count`/`max_count` ranges, audience, platform, tone, and the main selection prompt |
-| `kodik_download` | Title list in the form `["Title", "1-3", "Dub studio"]` |
+| `kodik_download` | Title list in the form `["Title", "1-3", "Dub studio"]`; two optional slots follow — max quality and player name: `["Title", "1-3", "Dub studio", 720, "kodik"]` |
 
 On subtitles specifically: with `improve_transcript_quality: true` the clip is **re-transcribed** with a
 heavier model (`enhanced_whisper_model`), then the text is cleaned by an LLM (`enhancer_model`) — spelling
@@ -351,7 +352,7 @@ style. Colour emoji are rendered via Pilmoji using the font at `emoji_font_path`
 Set `debug: true` in a channel config:
 
 - input comes from `test_data/`, output goes to `output_test_data/`;
-- Kodik download is disabled;
+- the download stage is disabled;
 - intermediate artifacts are written: `<video>_transcript.txt`, `<video>_moments.json`,
   `<video>_chatgpt_payload.txt`;
 - if moments were not computed but post-clip stages are enabled, the whole video is used as one segment,
@@ -372,16 +373,19 @@ pytest -m "not render"    # fast layer, no real rendering (~30 s)
 pytest -m render          # only stages that actually render a clip (~28 s)
 ```
 
-The tests are hermetic: OpenAI, Telegram and Kodik are mocked, and the `whisper` module is replaced by a
-stub in `tests/conftest.py` (otherwise CI would pull torch and download models). `mediapipe` and
-`anime_parsers_ru` are deliberately not installed in CI — the code has to degrade to the fallback
-detectors, and that is part of what is being checked.
+The tests are hermetic: OpenAI, Telegram and the episode download are mocked, and the `whisper` module
+is replaced by a stub in `tests/conftest.py` (otherwise CI would pull torch and download models).
+`mediapipe` is deliberately not installed in CI — the code has to degrade to the fallback detectors,
+and that is part of what is being checked. `anime-dl-core`, on the other hand, *is* installed: it is
+pure Python with a single dependency, and `test_autodownload.py` runs against its real player registry
+with only the network mocked out.
 
 | File | What it covers |
 |---|---|
 | `test_check_structure.py` | Channel structure creation and the default `config.yaml` |
 | `test_channel_processor.py` | Orchestration: which stages run, automatic `make_clips`, debug mode, clip replacement after `spoof_metadata` |
 | `test_transcriber.py` | ffmpeg track extraction, Whisper model choice, text and `<hl>` normalization |
+| `test_autodownload.py` | Episode download: config parsing, title/dub/player/stream selection, falling back to the next player |
 | `test_audio_analyzer.py` | RMS / ZCR / spectral centroid, peak-to-event merging |
 | `test_moment_scorer.py` | Signal time grid, window scoring, NMS candidate selection |
 | `test_moment_validator.py` | Segment repair, rejection of empty moments, heuristic top-up |
@@ -425,8 +429,11 @@ source videos and rendered clips stay outside the container.
 
 - `OPENAI_API_KEY` is required even for runs without an LLM — the check sits at `config.py` import time.
 - The **legacy** `openai==0.28.0` API (`openai.ChatCompletion`) is used, not the current SDK.
-- Kodik is blocked by many ISPs: the resolver for `kodik-api.com` is checked before the request, and if
-  it is unreachable the stage is skipped softly and the pipeline continues with already-downloaded videos.
+- Anime sites are blocked by many ISPs: `animego.org` is resolved before the request, and if it is
+  unreachable the stage is skipped softly and the pipeline continues with already-downloaded videos.
+  `ANIMEGO_MIRROR` and `ANIME_DL_PROXY` are the way around that.
+- Players break without warning, so the stage walks the whole list of players a title offers and stops
+  at the first one that returns a stream. An `hls`/`dash` stream is muxed into mp4 by ffmpeg.
 - `pilmoji 2.0.4` requires `emoji 1.x` — the version is pinned in `requirements.txt`; do not bump it blindly.
 - Whisper models are downloaded on first run; `large-v3-turbo` is significantly heavier than `base`.
 

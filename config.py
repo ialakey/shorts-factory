@@ -8,7 +8,12 @@ load_dotenv()
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-KODIK_TOKEN = os.getenv("KODIK_TOKEN")
+# Автозагрузка исходников (этап kodik_download) работает без токена:
+# anime-dl-core читает то же, что и обычный плеер в браузере.
+# Зеркало каталога, если основной домен заблокирован (например "animego.me").
+ANIMEGO_MIRROR = os.getenv("ANIMEGO_MIRROR")
+# Прокси для anime-dl-core: "http://host:port" или "socks5://host:port".
+ANIME_DL_PROXY = os.getenv("ANIME_DL_PROXY")
 
 if not OPENAI_API_KEY:
     raise ValueError("❌ Переменная OPENAI_API_KEY не найдена в .env!")
@@ -28,9 +33,6 @@ REQUIRED_DIRS = [
     "assets/fonts",
     "logs",
 ]
-
-# Whether to use the lxml HTML parser inside anime_parsers_ru
-USE_LXML = True
 
 # --- Шаблон config.yaml для новых каналов ---
 def DEFAULT_CONFIG(name: str):

@@ -4,7 +4,9 @@
 #   * openai-whisper (тянет torch, ~2 ГБ) — в тестах заглушается в conftest.py;
 #   * mediapipe — необязательный бэкенд детектора, код обязан работать без него
 #     (fallback YuNet → Haar), и CI как раз проверяет эту деградацию;
-#   * anime_parsers_ru — нужен только сетевому этапу kodik_download, заглушается.
+#
+# anime-dl-core, наоборот, ставится: он чистый python с одной зависимостью
+# (requests), и тесты автозагрузки гоняют его модели и реестр плееров.
 #
 # opencv-python заменён на headless-сборку: в CI нет GUI-библиотек.
 
@@ -19,6 +21,7 @@ Pillow==11.0.0
 PyYAML==6.0.2
 opencv-python-headless==4.10.0.84
 python-dotenv==1.1.1
+anime-dl-core==0.4.1
 pilmoji==2.0.4
 # pilmoji 2.0.4 requires emoji 1.x: get_emoji_unicode_dict was removed in emoji 2.0.0
 emoji==1.7.0

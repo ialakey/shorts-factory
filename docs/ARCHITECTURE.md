@@ -19,7 +19,7 @@
 
 1. Загружает `channels/<name>/config.yaml`.
 2. Вычисляет `pipeline` и режим `debug`.
-3. Опционально запускает Kodik-загрузку (`kodik_download`/`autodownload`).
+3. Опционально запускает автозагрузку исходников (`kodik_download`/`autodownload`).
 4. Собирает входные видео из `input_videos`.
 5. Для каждого видео выполняет этапы:
    - `transcribe_video`
@@ -37,7 +37,9 @@
 ## 3. Модули пайплайна
 
 ### Ingestion
-- `ingestion/autodownload.py`: поиск/скачивание эпизодов через Kodik.
+- `ingestion/autodownload.py`: поиск/скачивание эпизодов через
+  [anime-dl-core](https://github.com/ialakey/anime-dl-core): каталог AnimeGO отдаёт ссылки
+  на плееры, библиотека — прямые ссылки на видео, дальше `requests` (mp4) или `ffmpeg` (hls/dash).
 - `ingestion/transcriber.py`: извлечение аудио (`ffmpeg`) + Whisper транскрибация.
 - `ingestion/parser.py`: поиск локальных видео в `input_videos/`.
 
@@ -130,4 +132,4 @@ transcript → audio events → face/scene activity → tempo windows → hooks
 - OpenAI API
 - Whisper (локальная модель)
 - MoviePy + OpenCV + Pillow
-- Опционально: Kodik API, Telegram Bot API
+- Опционально: AnimeGO + аниме-плееры (через anime-dl-core), Telegram Bot API

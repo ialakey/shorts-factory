@@ -6,15 +6,17 @@
   ``openai.ChatCompletion.create`` в тестах замоканы;
 * **никакого Whisper** — модуль ``whisper`` всегда подменяется заглушкой,
   иначе тесты тянули бы torch и качали модели;
-* **никакой сети** — Kodik и Telegram замоканы;
-* необязательные тяжёлые зависимости (``mediapipe``, ``anime_parsers_ru``)
-  могут отсутствовать: код обязан деградировать, а не падать.
+* **никакой сети** — автозагрузка и Telegram замоканы;
+* необязательная тяжёлая зависимость ``mediapipe`` может отсутствовать: код
+  обязан деградировать до fallback-детектора, а не падать.
+
+``anime-dl-core`` заглушкой не подменяется — он лёгкий и ставится в CI,
+а сеть в тестах автозагрузки перехватывается на уровне ``AnimeGo``/``extract``.
 """
 
 from __future__ import annotations
 
 import copy
-import importlib.util
 import shutil
 import os
 import subprocess
@@ -102,28 +104,6 @@ def _install_whisper_stub() -> types.ModuleType:
 
 
 WHISPER_STUB = _install_whisper_stub()
-
-
-def _module_available(name: str) -> bool:
-    try:
-        return importlib.util.find_spec(name) is not None
-    except (ImportError, ValueError):
-        return False
-
-
-if not _module_available("anime_parsers_ru"):
-    # В CI парсер Kodik не ставим: он нужен только для сетевого этапа загрузки,
-    # но импортируется на уровне модуля ingestion/autodownload.py.
-    _kodik_stub = types.ModuleType("anime_parsers_ru")
-
-    class _KodikParser:  # pragma: no cover - вызывается только в сетевом коде
-        def __init__(self, *args, **kwargs):
-            raise RuntimeError(
-                "anime_parsers_ru недоступен в тестовом окружении"
-            )
-
-    _kodik_stub.KodikParser = _KodikParser
-    sys.modules["anime_parsers_ru"] = _kodik_stub
 
 
 @pytest.fixture(autouse=True)

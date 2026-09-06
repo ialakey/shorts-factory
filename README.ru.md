@@ -136,7 +136,8 @@ cp .env.example .env
 OPENAI_API_KEY=sk-...     # обязателен
 TELEGRAM_BOT_TOKEN=       # опционально — только для этапа telegram_notify
 TELEGRAM_CHAT_ID=
-KODIK_TOKEN=              # опционально — только для этапа kodik_download
+ANIMEGO_MIRROR=           # опционально — зеркало AnimeGO, если основной домен заблокирован
+ANIME_DL_PROXY=           # опционально — прокси для этапа скачивания (http:// или socks5://)
 ```
 
 `.env` в `.gitignore`. **Ни один токен не читается из `config.yaml`** — секреты живут только в окружении.
@@ -167,7 +168,7 @@ infrastructure/
   check_structure.py            # создание недостающих папок и config.yaml
 
 ingestion/
-  autodownload.py               # скачивание эпизодов через Kodik
+  autodownload.py               # скачивание эпизодов через anime-dl-core
   parser.py                     # поиск входных видео
   transcriber.py                # ffmpeg-извлечение аудио + Whisper
 
@@ -222,7 +223,7 @@ channels/<ChannelName>/
 
 | Этап | Модуль | Что делает |
 |---|---|---|
-| `kodik_download` | `ingestion/autodownload.py` | Скачивает эпизоды по списку тайтлов через Kodik (legacy-имя `autodownload` поддерживается) |
+| `kodik_download` | `ingestion/autodownload.py` | Скачивает эпизоды по списку тайтлов через [anime-dl-core](https://github.com/ialakey/anime-dl-core) (legacy-имя `autodownload` поддерживается) |
 | `transcribe_video` | `ingestion/transcriber.py` | Извлекает первую аудиодорожку через ffmpeg (16 kHz mono PCM) и распознаёт её Whisper'ом |
 | `analyze_moment` | `analysis/gpt_analyzer.py` | Собирает мультисигнальный payload и получает от LLM список моментов с сегментами |
 | `make_clips` | `rendering/video_editor.py` | Режет и склеивает сегменты, собирает финальное полотно 1080×1920 |
@@ -335,7 +336,7 @@ hook всегда в первом сегменте, последний — cliff
 | `moment_scoring` | Веса сигналов и отбор кандидатов до похода в LLM |
 | `moment_validation` | Притягивание границ и правила отбраковки после LLM |
 | `gpt` | Модель, диапазоны `min_time`/`max_time` и `min_count`/`max_count`, аудитория, платформа, тон и главный промпт отбора моментов |
-| `kodik_download` | Список тайтлов вида `["Название", "1-3", "Студия озвучки"]` |
+| `kodik_download` | Список тайтлов вида `["Название", "1-3", "Студия озвучки"]`; дальше два необязательных поля — максимальное качество и имя плеера: `["Название", "1-3", "Студия", 720, "kodik"]` |
 
 Про субтитры отдельно: при `improve_transcript_quality: true` клип **переразпознаётся** более тяжёлой
 моделью (`enhanced_whisper_model`), затем текст чистится через LLM (`enhancer_model`) — правится
@@ -349,7 +350,7 @@ hook всегда в первом сегменте, последний — cliff
 `debug: true` в конфиге канала:
 
 - вход берётся из `test_data/`, выход пишется в `output_test_data/`;
-- загрузка с Kodik отключается;
+- этап скачивания отключается;
 - сохраняются промежуточные артефакты: `<video>_transcript.txt`, `<video>_moments.json`,
   `<video>_chatgpt_payload.txt`;
 - если моменты не считались, а пост-клиповые этапы включены — берётся весь ролик целиком,
@@ -370,15 +371,18 @@ pytest -m "not render"    # быстрый слой, без реального �
 pytest -m render          # только этапы, которые реально рендерят клип (~28 c)
 ```
 
-Тесты герметичны: OpenAI, Telegram и Kodik замоканы, модуль `whisper` подменяется заглушкой в
-`tests/conftest.py` (иначе CI тянул бы torch и качал модели). `mediapipe` и `anime_parsers_ru`
-намеренно не ставятся в CI — код обязан деградировать на fallback-детекторы, и это тоже проверяется.
+Тесты герметичны: OpenAI, Telegram и скачивание эпизодов замоканы, модуль `whisper` подменяется
+заглушкой в `tests/conftest.py` (иначе CI тянул бы torch и качал модели). `mediapipe` намеренно не
+ставится в CI — код обязан деградировать на fallback-детекторы, и это тоже проверяется.
+`anime-dl-core`, наоборот, ставится: это чистый python с одной зависимостью, и `test_autodownload.py`
+гоняет настоящий реестр плееров библиотеки, замокав только сеть.
 
 | Файл | Что покрывает |
 |---|---|
 | `test_check_structure.py` | Создание структуры канала и дефолтного `config.yaml` |
 | `test_channel_processor.py` | Оркестрация: какие этапы запускаются, автозапуск `make_clips`, debug-режим, замена клипа после `spoof_metadata` |
 | `test_transcriber.py` | Извлечение дорожки через ffmpeg, выбор модели Whisper, нормализация текста и `<hl>`-тегов |
+| `test_autodownload.py` | Автозагрузка: разбор конфига, выбор тайтла/озвучки/плеера/потока, откат на следующий плеер |
 | `test_audio_analyzer.py` | RMS / ZCR / спектральный центроид, склейка пиков в события |
 | `test_moment_scorer.py` | Временная сетка сигналов, скоринг окон, NMS-отбор кандидатов |
 | `test_moment_validator.py` | Починка сегментов, отбраковка пустых моментов, добивка эвристикой |
@@ -422,8 +426,11 @@ docker run --rm --env-file .env -v "$PWD/channels:/app/channels" ai-video-clippe
 
 - `OPENAI_API_KEY` обязателен даже для сценариев без LLM — проверка стоит на импорте `config.py`.
 - Используется **legacy-API** `openai==0.28.0` (`openai.ChatCompletion`), а не актуальный SDK.
-- Kodik у многих провайдеров заблокирован: перед запросом проверяется резолв `kodik-api.com`,
+- Аниме-сайты у многих провайдеров заблокированы: перед запросом проверяется резолв `animego.org`,
   при недоступности этап мягко пропускается и пайплайн продолжает работать с уже скачанными видео.
+  Обходится через `ANIMEGO_MIRROR` и `ANIME_DL_PROXY`.
+- Плееры ломаются без предупреждения, поэтому этап перебирает все плееры, которые сайт отдал для
+  серии, и останавливается на первом рабочем. Поток `hls`/`dash` собирается в mp4 через ffmpeg.
 - `pilmoji 2.0.4` требует `emoji 1.x` — версия зафиксирована в `requirements.txt`, не обновляйте вслепую.
 - Whisper-модели скачиваются при первом запуске; `large-v3-turbo` заметно тяжелее `base`.
 

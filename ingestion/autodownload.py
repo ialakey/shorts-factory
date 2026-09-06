@@ -1,23 +1,37 @@
-"""Автоматическая загрузка исходных эпизодов через Kodik.
+"""Автоматическая загрузка исходных эпизодов через ``anime-dl-core``.
 
-Модуль адаптирован из скрипта ``kodik-download/download_episode.py`` и
-предназначен для использования внутри пайплайна канала. Основная задача —
-скачать указанные тайтлы в папку ``input_videos`` перед запуском остальных
-этапов обработки.
+Модуль скачивает указанные тайтлы в папку ``input_videos`` перед запуском
+остальных этапов обработки.
+
+Как это устроено:
+
+1. каталог (AnimeGO) ищет тайтл и отдаёт ссылки на плееры для нужной серии —
+   ``anime_dl_core.sources.AnimeGo``;
+2. ядро библиотеки превращает ссылку на плеер в прямые ссылки на видео —
+   ``anime_dl_core.extract``;
+3. прямой ``mp4`` качается обычным ``requests``, ``hls``/``dash`` — через
+   ``ffmpeg`` (он и так нужен пайплайну).
+
+Токен не нужен: библиотека читает ровно то же, что читает обычный плеер в
+браузере. Плееров несколько (Kodik, CVH, Aniboom, Sibnet, ...), и если один
+не отдал видео, берётся следующий — раньше отказ Kodik означал отказ всего
+этапа.
 """
 
 from __future__ import annotations
 
-import os
+import shutil
 import socket
+import subprocess
 import unicodedata
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+import anime_dl_core as adc
 import requests
-from anime_parsers_ru import KodikParser
+from anime_dl_core.sources import AnimeGo, AnimeItem, PlayerLink
 from requests import exceptions as req_exc
 
 import config
@@ -27,63 +41,98 @@ class AutodownloadError(RuntimeError):
     """Базовая ошибка автозагрузки."""
 
 
-# Kodik переехал: старый ``kodikapi.com`` снят с делегирования (NXDOMAIN),
-# актуальный домен API — ``kodik-api.com``.
-KODIK_API_HOST = "kodik-api.com"
+#: Каталог, из которого берутся ссылки на плееры (можно заменить зеркалом).
+SOURCE_HOST = "animego.org"
 
-NETWORK_HINT = (
-    f"хост {KODIK_API_HOST} недоступен. Проверьте интернет, DNS или VPN "
-    "(у многих провайдеров Kodik заблокирован)."
+#: Порядок предпочтения плееров: сначала те, что отдают прямой mp4 —
+#: их можно скачать без ffmpeg и без склейки сегментов.
+PLAYER_PRIORITY = (
+    "kodik",
+    "cvh",
+    "sibnet",
+    "vk",
+    "animedia",
+    "aniboom",
+    "anilibria",
+    "sovetromantica",
 )
 
 
-def is_kodik_reachable(host: str = KODIK_API_HOST) -> bool:
-    """Быстро проверяет, что домен Kodik вообще резолвится.
+def source_host() -> str:
+    """Домен каталога с учётом зеркала из ``ANIMEGO_MIRROR``."""
 
-    Библиотека ``anime_parsers_ru`` ходит в сеть без таймаутов и превращает
-    сетевые сбои в ``UnexpectedBehavior``, поэтому дешевле отсечь заведомо
-    недоступный хост заранее и вернуть понятное сообщение.
+    mirror = getattr(config, "ANIMEGO_MIRROR", None)
+    return mirror if isinstance(mirror, str) and mirror else SOURCE_HOST
+
+
+def network_hint() -> str:
+    return (
+        f"хост {source_host()} недоступен. Проверьте интернет, DNS или VPN "
+        "(у многих провайдеров аниме-сайты заблокированы). Зеркало задаётся "
+        "переменной ANIMEGO_MIRROR, прокси — ANIME_DL_PROXY."
+    )
+
+
+def is_source_reachable(host: Optional[str] = None) -> bool:
+    """Быстро проверяет, что домен каталога вообще резолвится.
+
+    Дешевле отсечь заведомо недоступный хост заранее и вернуть понятное
+    сообщение, чем ждать таймаутов на каждой серии.
     """
 
     try:
-        socket.getaddrinfo(host, 443, proto=socket.IPPROTO_TCP)
+        socket.getaddrinfo(host or source_host(), 443, proto=socket.IPPROTO_TCP)
     except OSError:
         return False
     return True
 
 
-@dataclass
-class SearchResult:
-    raw: dict
+def client_kwargs() -> Dict[str, Any]:
+    """Общие параметры http-клиента библиотеки (таймаут, прокси)."""
+
+    kwargs: Dict[str, Any] = {"timeout": 30.0}
+    proxy = getattr(config, "ANIME_DL_PROXY", None)
+    if isinstance(proxy, str) and proxy:
+        kwargs["proxy"] = proxy
+    return kwargs
+
+
+def create_site() -> AnimeGo:
+    """Клиент каталога. Бросает :class:`AutodownloadError`, если хост недоступен."""
+
+    if not is_source_reachable():
+        raise AutodownloadError(f"Каталог недоступен: {network_hint()}")
+
+    mirror = getattr(config, "ANIMEGO_MIRROR", None)
+    return AnimeGo(
+        mirror=mirror if isinstance(mirror, str) and mirror else None,
+        **client_kwargs(),
+    )
+
+
+@dataclass(frozen=True)
+class DownloadRequest:
+    """Одна запись секции ``kodik_download``/``autodownload``."""
+
+    title: str
+    episodes: str
+    voice: Optional[str] = None
+    max_quality: Optional[int] = None
+    player: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class Candidate:
+    """Ссылка на плеер, пригодная для скачивания."""
+
+    link: PlayerLink
+    player: str
+    """Имя плеера в терминах библиотеки (``kodik``, ``cvh``, ...)."""
+    voice_score: float
 
     @property
-    def title(self) -> str:
-        return self.raw.get("title") or ""
-
-    @property
-    def shikimori_id(self) -> Optional[str]:
-        value = self.raw.get("shikimori_id")
-        return str(value) if value is not None else None
-
-    @property
-    def kinopoisk_id(self) -> Optional[str]:
-        value = self.raw.get("kinopoisk_id")
-        return str(value) if value is not None else None
-
-
-@dataclass
-class Translation:
-    id: str
-    name: str
-    type: str
-
-    @classmethod
-    def from_dict(cls, data: dict) -> "Translation":
-        return cls(
-            id=str(data.get("id", "0")),
-            name=str(data.get("name", "Неизвестно")),
-            type=str(data.get("type", "voice")),
-        )
+    def voice(self) -> str:
+        return self.link.label or self.player
 
 
 def normalise_filename(value: str) -> str:
@@ -98,67 +147,92 @@ def normalise_filename(value: str) -> str:
     return "_".join(cleaned.split()) or "episode"
 
 
-def resolve_token() -> Optional[str]:
-    token = os.environ.get("KODIK_TOKEN")
-    if token:
-        return token
-    if isinstance(config.KODIK_TOKEN, str) and config.KODIK_TOKEN:
-        return config.KODIK_TOKEN
-    return None
+def choose_best_result(results: Iterable[AnimeItem], query: str) -> AnimeItem:
+    """Самый похожий на запрос тайтл (сравниваются оба названия — ру и ориг.)."""
 
+    query_lower = query.lower()
 
-def _build_parser(token: Optional[str], validate: bool) -> KodikParser:
-    if token:
-        return KodikParser(token=token, use_lxml=config.USE_LXML, validate_token=validate)
-    return KodikParser(use_lxml=config.USE_LXML, validate_token=validate)
-
-
-def create_parser(token: Optional[str]) -> KodikParser:
-    if not is_kodik_reachable():
-        raise AutodownloadError(f"Kodik недоступен: {NETWORK_HINT}")
+    def ratio(item: AnimeItem) -> float:
+        titles = [item.title or "", item.original_title or ""]
+        return max(SequenceMatcher(None, name.lower(), query_lower).ratio() for name in titles)
 
     try:
-        return _build_parser(token, validate=True)
-    except Exception as exc:  # noqa: BLE001 - библиотека бросает разные исключения
-        print(f"   ⚠️ Не удалось проверить токен Kodik ({exc}). Пробуем без валидации ...")
-
-    try:
-        return _build_parser(token, validate=False)
-    except Exception as exc:  # noqa: BLE001 - библиотека бросает разные исключения
-        raise AutodownloadError(
-            f"Не удалось инициализировать парсер Kodik: {exc}"
-        ) from exc
-
-
-def choose_best_result(results: Iterable[SearchResult], query: str) -> SearchResult:
-    try:
-        return max(
-            results,
-            key=lambda item: SequenceMatcher(None, item.title.lower(), query.lower()).ratio(),
-        )
+        return max(results, key=ratio)
     except ValueError as exc:
         raise AutodownloadError("Ничего не найдено по заданному названию.") from exc
 
 
-def choose_translation(translations: Iterable[dict], voice: Optional[str]) -> Translation:
-    prepared = [Translation.from_dict(item) for item in translations]
-    if not prepared:
-        raise AutodownloadError("Нет доступных переводов для выбранного тайтла.")
+def library_player(link: PlayerLink) -> Optional[str]:
+    """Имя плеера библиотеки для ссылки или ``None``, если плеер не поддержан."""
 
-    if not voice:
-        return prepared[0]
-
-    voice_lower = voice.lower()
-
-    def weight(item: Translation) -> float:
-        return SequenceMatcher(None, item.name.lower(), voice_lower).ratio()
-
-    return max(prepared, key=weight)
-
-
-def download_episode(url: str, destination: Path) -> None:
     try:
-        response = requests.get(url, stream=True, timeout=30)
+        return adc.get_player_class(link.embed).name
+    except adc.UnsupportedUrl:
+        return None
+
+
+def order_candidates(
+    links: Iterable[PlayerLink],
+    voice: Optional[str] = None,
+    player: Optional[str] = None,
+) -> List[Candidate]:
+    """Кандидаты по убыванию пригодности: сначала нужная озвучка, затем плеер.
+
+    Возвращается список, а не один вариант: плееры регулярно ломаются, и
+    перебор — единственный способ всё-таки скачать серию.
+    """
+
+    voice_lower = voice.lower() if voice else None
+    player_lower = player.lower() if player else None
+
+    candidates: List[Candidate] = []
+    for link in links:
+        name = library_player(link)
+        if name is None:
+            continue
+        if player_lower and name != player_lower:
+            continue
+        score = (
+            SequenceMatcher(None, (link.label or "").lower(), voice_lower).ratio()
+            if voice_lower
+            else 0.0
+        )
+        candidates.append(Candidate(link=link, player=name, voice_score=score))
+
+    def priority(candidate: Candidate) -> int:
+        try:
+            return PLAYER_PRIORITY.index(candidate.player)
+        except ValueError:
+            return len(PLAYER_PRIORITY)
+
+    candidates.sort(key=lambda item: (-item.voice_score, priority(item)))
+    return candidates
+
+
+def pick_stream(result: adc.PlayerResult, max_quality: Optional[int] = None) -> Optional[adc.Stream]:
+    """Лучший поток: максимальное качество, при равенстве — mp4 (его проще скачать).
+
+    Мастер-плейлист берётся, только если ничего другого нет, а ограничение
+    ``max_quality`` снимается, если под него не подошёл ни один поток.
+    """
+
+    limits = (max_quality, None) if max_quality else (None,)
+    for limit in limits:
+        for allow_master in (False, True):
+            try:
+                return result.best(max_quality=limit, allow_master=allow_master)
+            except adc.NoStreamsFound:
+                continue
+    return None
+
+
+def download_episode(
+    url: str, destination: Path, headers: Optional[Dict[str, str]] = None
+) -> None:
+    """Скачивает прямой файл. ``headers`` обязательны: без Referer CDN отдаёт 403."""
+
+    try:
+        response = requests.get(url, stream=True, timeout=30, headers=headers or {})
         response.raise_for_status()
     except req_exc.RequestException as exc:
         raise AutodownloadError(f"Ошибка при скачивании: {exc}") from exc
@@ -194,6 +268,43 @@ def download_episode(url: str, destination: Path) -> None:
     print("\r   ⬇️ Загрузка завершена." + " " * 20)
 
 
+def download_via_ffmpeg(stream: adc.Stream, destination: Path) -> None:
+    """Склеивает HLS/DASH в mp4 без перекодирования."""
+
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise AutodownloadError(
+            "Поток отдаётся только как HLS/DASH, а ffmpeg не найден в PATH."
+        )
+
+    # ffmpeg выбирает контейнер по расширению, поэтому временный файл — тоже .mp4.
+    partial = destination.with_name(destination.stem + ".part.mp4")
+    args = stream.ffmpeg_args(str(partial))
+    args[0] = ffmpeg
+    args[1:1] = ["-y", "-hide_banner", "-loglevel", "error", "-nostdin"]
+
+    result = subprocess.run(
+        args, capture_output=True, text=True, encoding="utf-8", errors="replace"
+    )
+    if result.returncode != 0 or not partial.exists():
+        partial.unlink(missing_ok=True)
+        details = (result.stderr or result.stdout or "").strip().splitlines()
+        tail = details[-1] if details else "без подробностей"
+        raise AutodownloadError(
+            f"ffmpeg не смог скачать поток (код {result.returncode}): {tail}"
+        )
+
+    partial.replace(destination)
+    print("   ⬇️ Загрузка завершена (ffmpeg).")
+
+
+def download_stream(stream: adc.Stream, destination: Path) -> None:
+    if stream.kind is adc.StreamKind.MP4:
+        download_episode(stream.url, destination, headers=dict(stream.headers))
+    else:
+        download_via_ffmpeg(stream, destination)
+
+
 def parse_episode_range(spec: str) -> List[int]:
     result: List[int] = []
     for part in spec.replace(" ", "").split(","):
@@ -211,95 +322,137 @@ def parse_episode_range(spec: str) -> List[int]:
     return sorted(set(result))
 
 
-def download_by_title(
-    title: str,
-    episodes: str = "1",
-    voice: Optional[str] = "AniLibria",
-    destination: Optional[Path] = None,
-) -> List[Path]:
-    episode_list = parse_episode_range(str(episodes))
+def _episode_filename(title: str, episode: int, voice: str, quality: Optional[int]) -> str:
+    quality_part = f"{quality}p" if quality else "auto"
+    return normalise_filename(f"{title} - Серия {episode} - {voice} - {quality_part}") + ".mp4"
 
-    if not episode_list:
-        raise AutodownloadError("Не указаны серии для скачивания.")
 
-    destination = Path(destination or Path.cwd())
-    destination.mkdir(parents=True, exist_ok=True)
-
-    token = resolve_token()
-    kodik = create_parser(token)
+def _download_one_episode(
+    site: AnimeGo,
+    anime: AnimeItem,
+    episode: int,
+    request: DownloadRequest,
+    destination: Path,
+) -> Optional[Path]:
+    """Скачивает одну серию, перебирая плееры. ``None`` — не получилось."""
 
     try:
-        results = [SearchResult(raw=item) for item in kodik.search(title, limit=15)]
-    except Exception as exc:  # noqa: BLE001 - библиотека генерирует разные исключения
-        raise AutodownloadError(f"Ошибка поиска тайтла '{title}': {exc}") from exc
+        links = site.players(anime.id, episode=episode)
+    except adc.AnimeDlCoreError as exc:
+        print(f"   ❌ Нет плееров для серии {episode}: {exc}")
+        return None
 
-    chosen = choose_best_result(results, title)
+    candidates = order_candidates(links, request.voice, request.player)
+    if not candidates:
+        print(f"   ❌ Для серии {episode} нет плееров, поддержанных anime-dl-core.")
+        return None
 
-    if chosen.shikimori_id:
-        id_type = "shikimori"
-        serial_id = chosen.shikimori_id
-    elif chosen.kinopoisk_id:
-        id_type = "kinopoisk"
-        serial_id = chosen.kinopoisk_id
-    else:
-        raise AutodownloadError("Не удалось определить идентификатор тайтла.")
-
-    try:
-        serial_info = kodik.get_info(serial_id, id_type)
-    except Exception as exc:  # noqa: BLE001 - библиотека генерирует разные исключения
-        raise AutodownloadError(
-            f"Не удалось получить информацию о тайтле '{title}': {exc}"
-        ) from exc
-
-    translation = choose_translation(serial_info.get("translations", []), voice)
-
-    saved_files: List[Path] = []
-
-    for ep in episode_list:
-        print(f"  🎬 Скачиваем {title} — серия {ep}")
+    for candidate in candidates:
         try:
-            # anime_parsers_ru >= 1.13 возвращает третьим элементом список качеств,
-            # более старые версии — только ссылку и максимальное качество.
-            link, max_quality, *_ = kodik.get_link(serial_id, id_type, ep, translation.id)
-        except Exception as exc:  # noqa: BLE001 - библиотека генерирует разные исключения
-            print(f"   ❌ Не удалось получить ссылку на серию {ep}: {exc}")
+            result = adc.extract(candidate.link.embed, **client_kwargs())
+        except adc.AnimeDlCoreError as exc:
+            print(f"   ⚠️ Плеер {candidate.player} ({candidate.voice}) не отдал видео: {exc}")
             continue
 
-        filename = (
-            normalise_filename(
-                f"{chosen.title or title} - Серия {ep} - {translation.name} - {max_quality}p"
-            )
-            + ".mp4"
-        )
-        output_path = destination / filename
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+        stream = pick_stream(result, request.max_quality)
+        if stream is None:
+            print(f"   ⚠️ Плеер {candidate.player} ({candidate.voice}) не вернул ни одного потока.")
+            continue
 
+        output_path = destination / _episode_filename(
+            anime.title or request.title, episode, candidate.voice, stream.quality
+        )
         if output_path.exists():
             print(f"   ⚠️ Файл уже существует, пропускаем: {output_path.name}")
-            saved_files.append(output_path)
-            continue
+            return output_path
 
-        print(f"   🎧 Озвучка: {translation.name}")
-        print(f"   📺 Качество: {max_quality}p")
+        print(f"   🎧 Озвучка: {candidate.voice}")
+        print(
+            f"   📺 Плеер: {candidate.player}, качество: {stream.quality or 'auto'}, "
+            f"формат: {stream.kind}"
+        )
         print(f"   📂 Путь сохранения: {output_path}")
 
         try:
-            download_episode(f"https:{link}{max_quality}.mp4", output_path)
+            download_stream(stream, output_path)
         except AutodownloadError as exc:
-            print(f"   ❌ Серия {ep} не скачана: {exc}")
+            print(f"   ❌ Не удалось скачать через {candidate.player}: {exc}")
             continue
 
         print(f"   💾 Сохранено: {output_path}")
-        saved_files.append(output_path)
+        return output_path
+
+    print(f"   ❌ Серия {episode} не скачана: все плееры отказали.")
+    return None
+
+
+def download_request(request: DownloadRequest, destination: Path) -> List[Path]:
+    episode_list = parse_episode_range(request.episodes)
+    if not episode_list:
+        raise AutodownloadError("Не указаны серии для скачивания.")
+
+    destination = Path(destination)
+    destination.mkdir(parents=True, exist_ok=True)
+
+    saved_files: List[Path] = []
+    with create_site() as site:
+        try:
+            results = site.search(request.title, limit=15)
+        except adc.AnimeDlCoreError as exc:
+            raise AutodownloadError(
+                f"Ошибка поиска тайтла '{request.title}': {exc}"
+            ) from exc
+
+        anime = choose_best_result(results, request.title)
+        print(f"   🔎 Найдено: {anime.title} ({anime.url})")
+
+        for episode in episode_list:
+            print(f"  🎬 Скачиваем {anime.title or request.title} — серия {episode}")
+            saved = _download_one_episode(site, anime, episode, request, destination)
+            if saved is not None:
+                saved_files.append(saved)
 
     return saved_files
 
 
-def _normalise_entry(entry: object) -> Tuple[str, str, Optional[str]]:
+def download_by_title(
+    title: str,
+    episodes: str = "1",
+    voice: Optional[str] = None,
+    destination: Optional[Path] = None,
+    *,
+    max_quality: Optional[int] = None,
+    player: Optional[str] = None,
+) -> List[Path]:
+    request = DownloadRequest(
+        title=title,
+        episodes=str(episodes),
+        voice=voice,
+        max_quality=max_quality,
+        player=player,
+    )
+    return download_request(request, Path(destination or Path.cwd()))
+
+
+def _as_int(value: Any) -> Optional[int]:
+    if value in (None, ""):
+        return None
+    try:
+        return int(str(value).rstrip("pP"))
+    except ValueError:
+        return None
+
+
+def _normalise_entry(entry: object) -> DownloadRequest:
+    quality: Any = None
+    player: Any = None
+
     if isinstance(entry, dict):
         title = entry.get("title") or entry.get("name")
         episodes = entry.get("episodes") or entry.get("count")
         voice = entry.get("voice") or entry.get("translation")
+        quality = entry.get("quality") or entry.get("max_quality")
+        player = entry.get("player")
     elif isinstance(entry, Sequence) and not isinstance(entry, (str, bytes, bytearray)):
         try:
             title, episodes, *rest = entry
@@ -308,6 +461,8 @@ def _normalise_entry(entry: object) -> Tuple[str, str, Optional[str]]:
                 "Каждый элемент kodik_download/autodownload должен содержать минимум название и количество серий."
             ) from exc
         voice = rest[0] if rest else None
+        quality = rest[1] if len(rest) > 1 else None
+        player = rest[2] if len(rest) > 2 else None
     else:
         raise AutodownloadError(
             "Элементы kodik_download/autodownload должны быть словарями или последовательностями (title, episodes, voice)."
@@ -323,7 +478,13 @@ def _normalise_entry(entry: object) -> Tuple[str, str, Optional[str]]:
             f"Не указаны серии для тайтла '{title}' в настройках kodik_download/autodownload."
         )
 
-    return str(title), str(episodes), (str(voice) if voice not in (None, "") else None)
+    return DownloadRequest(
+        title=str(title),
+        episodes=str(episodes),
+        voice=str(voice) if voice not in (None, "") else None,
+        max_quality=_as_int(quality),
+        player=str(player) if player not in (None, "") else None,
+    )
 
 
 def auto_download_titles(entries: Optional[Iterable[object]], destination: Path) -> List[Path]:
@@ -334,8 +495,8 @@ def auto_download_titles(entries: Optional[Iterable[object]], destination: Path)
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
 
-    if not is_kodik_reachable():
-        print(f"⚠️ Пропускаем скачивание: {NETWORK_HINT}")
+    if not is_source_reachable():
+        print(f"⚠️ Пропускаем скачивание: {network_hint()}")
         print("   Продолжаем с уже скачанными видео в input_videos.")
         return []
 
@@ -343,19 +504,22 @@ def auto_download_titles(entries: Optional[Iterable[object]], destination: Path)
 
     for raw_entry in entries:
         try:
-            title, episodes, voice = _normalise_entry(raw_entry)
+            request = _normalise_entry(raw_entry)
         except AutodownloadError as exc:
             print(f"❌ Пропускаем запись kodik_download/autodownload: {exc}")
             continue
 
-        print(f"⬇️ Автозагрузка: {title} (серии: {episodes}, озвучка: {voice or 'по умолчанию'})")
+        print(
+            f"⬇️ Автозагрузка: {request.title} (серии: {request.episodes}, "
+            f"озвучка: {request.voice or 'любая'})"
+        )
         try:
-            downloaded = download_by_title(title, episodes, voice, destination)
+            downloaded = download_request(request, destination)
         except AutodownloadError as exc:
-            print(f"❌ Не удалось скачать '{title}': {exc}")
+            print(f"❌ Не удалось скачать '{request.title}': {exc}")
             continue
         except Exception as exc:  # noqa: BLE001 - сеть/библиотека не должны ронять пайплайн
-            print(f"❌ Непредвиденная ошибка при скачивании '{title}': {exc}")
+            print(f"❌ Непредвиденная ошибка при скачивании '{request.title}': {exc}")
             continue
 
         all_downloaded.extend(downloaded)

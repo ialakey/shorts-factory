@@ -16,8 +16,9 @@ opencv-python==4.10.0.84
 mediapipe==0.10.14   # необязательный бэкенд: без него работает fallback YuNet → Haar
 
 # --- Скачивание исходников (этап kodik_download) ---
-anime_parsers_ru==1.17.0
-lxml==5.2.1
+# https://github.com/ialakey/anime-dl-core — прямые ссылки на видео из
+# аниме-плееров (Kodik, CVH, Aniboom, Sibnet, ...). Токен не нужен.
+anime-dl-core==0.4.1
 
 # --- Рендер эмодзи в субтитрах ---
 pilmoji==2.0.4
